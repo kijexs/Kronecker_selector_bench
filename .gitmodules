@@ -1,0 +1,4 @@
+[submodule "GraphBLAS"]
+	path = GraphBLAS
+	url = https://github.com/kijexs/GraphBLAS.git
+	branch = feat/kroner-user-selector
