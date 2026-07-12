@@ -34,6 +34,7 @@
 	} \
 } \
 
+
 static void print_usage(const char *name) {
 	fprintf(stderr, "Usage %s <RSA> <G> <M_meta> <Out>\n", name);
 	fprintf(stderr, "\n"
@@ -224,7 +225,8 @@ static int mem_reset_hwm() {
 #define MAX_RUNS 100
 
 struct experiment_result {
-	double time;
+	double time_kron;
+	double time_select;
 	size_t mem_before;
 	size_t mem_peak;
 	size_t mem_after;
@@ -242,15 +244,16 @@ static struct experiment_result results[MAX_RUNS];
 static int run_kron(size_t iterations) {
 	int rc = EXIT_SUCCESS;
 	GrB_Matrix C = NULL;
-	struct timespec t_start, t_end;
+	struct timespec t_start, t_kron, t_end;
 	for (size_t it = 0; it < iterations; ++it) {
 		TRY_GrB(GrB_Matrix_new (&C, GrB_BOOL, m_metadata.res_size, m_metadata.res_size), rc, "Cannot create matrix for result\n", run_kron_out);
 		TRY(mem_get_rss(&results[it].mem_before), rc, "Cannot get RSS before kron\n", run_kron_mat_free);
 		TRY(mem_reset_hwm(), rc, "Cannot reset HWM before kron\n", run_kron_mat_free);
-		
-		clock_gettime(CLOCK_MONOTONIC, &t_start) ;
-		
-		TRY_GrB(GrB_Matrix_kronecker_BinaryOp (C, NULL, NULL, GrB_EQ_FP64, NULL, Rsa, Graph, NULL), rc, "Cannot calculate kron\n", run_kron_out);
+
+		clock_gettime(CLOCK_MONOTONIC, &t_start);
+		TRY_GrB(GrB_Matrix_kronecker_BinaryOp (C, NULL, NULL, GrB_EQ_FP64, Rsa, Graph, NULL), rc, "Cannot calculate kron\n", run_kron_out);
+		clock_gettime(CLOCK_MONOTONIC, &t_kron);
+		TRY_GrB(GxB_Matrix_select(C, NULL, NULL, GxB_NONZERO, C, NULL, NULL), rc, "Cannot get nvals after kron\n", run_kron_out);
 		TRY_GrB(GrB_Matrix_nvals (&results[it].nnz, C), rc, "Cannot get nvals after kron\n", run_kron_out);
 		clock_gettime(CLOCK_MONOTONIC, &t_end);
 		/*if (it == 0) {
@@ -271,7 +274,8 @@ static int run_kron(size_t iterations) {
 		}*/
 		TRY(mem_get_hwm(&results[it].mem_peak), rc, "Cannot get RSS after kron\n", run_kron_mat_free);
 
-		results[it].time = (t_end.tv_sec - t_start.tv_sec) + (t_end.tv_nsec - t_start.tv_nsec) / 1e9;
+		results[it].time_kron = (t_kron.tv_sec - t_start.tv_sec) + (t_kron.tv_nsec - t_start.tv_nsec) / 1e9;
+		results[it].time_select = (t_end.tv_sec - t_kron.tv_sec) + (t_end.tv_nsec - t_kron.tv_nsec) / 1e9;
 		TRY(mem_get_rss(&results[it].mem_after), rc, "Cannot get RSS after kron\n", run_kron_mat_free);
 		TRY_GrB(GrB_Matrix_free(&C), rc, "Cannot clean result matrix\n", run_kron_out);
 	}
@@ -288,9 +292,9 @@ static int write_results(const char *filename) {
 		fprintf(stderr, "Cannot open file '%s' for writing results\n", filename);
 		return EXIT_FAILURE;
 	}
-	fputs("iteration,nnz,time,rss_before,hwm,rss_after\n", f);
+	fputs("iteration,nnz,time_kron,time_sel,rss_before,hwm,rss_after\n", f);
 	for (size_t i = 0; i < e_metadata.m_runs; ++i) {
-		fprintf(f, "%zu,%zu,%.6f,%zu,%zu,%zu\n", i, results[i].nnz, results[i].time, results[i].mem_before, results[i].mem_peak, results[i].mem_after);
+		fprintf(f, "%zu,%zu,%.6f,%.6f,%zu,%zu,%zu\n", i, results[i].nnz, results[i].time_kron, results[i].time_select, results[i].mem_before, results[i].mem_peak, results[i].mem_after);
 	}
 	fclose(f);
 	return EXIT_SUCCESS;
@@ -305,8 +309,8 @@ int main(int argc, char *argv[]) {
 	TRY(read_m_metadata(&m_metadata, argv[3]), rc, "Cannot get matrices metadata from file\n", out);
 	TRY(read_e_metadata(&e_metadata, argv[4]), rc, "Cannot get experiment metadata from file\n", out);
 	TRY_GrB(GrB_init(GrB_NONBLOCKING), rc, "Cannot initialize GraphBLAS\n", out);
-	GrB_Global_set_INT32 (GrB_GLOBAL, true, GxB_BURBLE) ;
 
+	GrB_Global_set_INT32 (GrB_GLOBAL, true, GxB_BURBLE) ;
 	TRY(read_matrix(&Rsa, argv[1], m_metadata.rsa_size), rc, "Cannot read RSA\n", out_free_rsa);
 	TRY(read_matrix(&Graph, argv[2], m_metadata.graph_size), rc, "Cannot read Graph\n", out_free_rsa);
 	// Warmup
