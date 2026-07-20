@@ -236,6 +236,29 @@ static struct exp_metadata e_metadata;
 
 static GrB_Matrix Rsa = NULL;
 static GrB_Matrix Graph = NULL;
+static size_t csize;
+
+/* селектор -- побайтовая проверка на 0
+первый аргемент -- адрес, куда нужно записать bool
+второй аргумент -- адрес значения, которое хотим фильтровать*/
+void simple_fun(bool *z, const void *x, GrB_Index i, GrB_Index j, const void *y)
+{
+	bool result = false;				
+
+	const unsigned char *bytes = (const unsigned char *)x;
+	for (size_t i = 0 ; i < csize ; ++i)
+	{
+		if (*(bytes + i))
+		{
+			result = true;
+			break;
+		}
+	}
+
+	*(bool *)z = result;
+}
+
+GrB_IndexUnaryOp selector;
 
 static struct experiment_result results[MAX_RUNS];
 
@@ -247,12 +270,19 @@ static int run_kron(size_t iterations) {
 		TRY_GrB(GrB_Matrix_new (&C, GrB_BOOL, m_metadata.res_size, m_metadata.res_size), rc, "Cannot create matrix for result\n", run_kron_out);
 		TRY(mem_get_rss(&results[it].mem_before), rc, "Cannot get RSS before kron\n", run_kron_mat_free);
 		TRY(mem_reset_hwm(), rc, "Cannot reset HWM before kron\n", run_kron_mat_free);
+
+		// определяем размер типа для работы селектора
+		GrB_Type ctype;
+		GxB_BinaryOp_ztype(&ctype, GrB_EQ_FP64); 
+		size_t csize_cur;
+		GxB_Type_size(&csize_cur, ctype);
+		csize = (size_t)csize_cur;
 		
-		bool thunk = false; 
+		TRY(GrB_IndexUnaryOp_new(&selector, (GxB_index_unary_function)&simple_fun, GrB_BOOL, GrB_UINT8, GrB_UINT8), rc, "Cannot get selector\n", run_kron_out);
 		
 		clock_gettime(CLOCK_MONOTONIC, &t_start) ;
 		
-		TRY_GrB(GrB_Matrix_kronecker_BinaryOp_sel (C, NULL, NULL, GrB_EQ_FP64, Rsa, Graph, NULL, GrB_VALUENE_BOOL, &thunk), rc, "Cannot calculate kron\n", run_kron_out);
+		TRY_GrB(GrB_Matrix_kronecker_BinaryOp_sel (C, NULL, NULL, GrB_EQ_FP64, Rsa, Graph, NULL, selector, NULL), rc, "Cannot calculate kron\n", run_kron_out);
 		TRY_GrB(GrB_Matrix_nvals (&results[it].nnz, C), rc, "Cannot get nvals after kron\n", run_kron_out);
 		clock_gettime(CLOCK_MONOTONIC, &t_end);
 		/*if (it == 0) {

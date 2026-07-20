@@ -34,6 +34,24 @@
 	} \
 } \
 
+#define EL_TYPE(SIZE) uint ## SIZE ## _t
+#define DEFINE_KRON_OP(SIZE) \
+void kron_op_ ## SIZE(void *z, const void *x, const void *y) { \
+	const EL_TYPE(SIZE) n_mask = (EL_TYPE(SIZE))((EL_TYPE(SIZE))0xe0 << (SIZE - 8)); \
+	const EL_TYPE(SIZE) t_mask = (EL_TYPE(SIZE))(~n_mask); \
+	const EL_TYPE(SIZE) a = * (EL_TYPE(SIZE) *) x; \
+	const EL_TYPE(SIZE) b = * (EL_TYPE(SIZE) *) y; \
+	* (bool *) z = (n_mask & a & b) \
+		|| ((t_mask & a) && ((t_mask & a) == (t_mask & b))); \
+} \
+
+#define KRON_OP(SIZE) kron_op_ ## SIZE
+
+DEFINE_KRON_OP(8)
+DEFINE_KRON_OP(16)
+DEFINE_KRON_OP(32)
+DEFINE_KRON_OP(64)
+
 static void print_usage(const char *name) {
 	fprintf(stderr, "Usage %s <RSA> <G> <M_meta> <Out>\n", name);
 	fprintf(stderr, "\n"
@@ -49,6 +67,35 @@ static void print_usage(const char *name) {
 	"    - Measure reps -- number of measurement runs\n"
 	"- [out] Out -- path to file for saving benchmark results\n"
 	 );
+}
+
+struct kron_input {
+	GrB_Type input_elemets_type;
+	void *operation;
+};
+
+static int get_kron_input(struct kron_input *k, int bits) {
+	switch (bits) {
+		case 8:
+			k->input_elemets_type = GrB_UINT8;
+			k->operation = KRON_OP(8);
+			break;
+		case 16:
+			k->input_elemets_type = GrB_UINT16;
+			k->operation = KRON_OP(16);
+			break;
+		case 32:
+			k->input_elemets_type = GrB_UINT32;
+			k->operation = KRON_OP(32);
+			break;
+		case 64:
+			k->input_elemets_type = GrB_UINT64;
+			k->operation = KRON_OP(64);
+			break;
+		default:
+			return EXIT_FAILURE;
+	}
+	return EXIT_SUCCESS;
 }
 
 struct matr_metadata {
@@ -113,67 +160,66 @@ read_m_metadata_out:
 	return rc;
 }
 
-static int read_matrix(GrB_Matrix *M, const char *filename, size_t ndim) {
-    int rc = 0;
-    FILE *f = fopen(filename, "r");
-    if (!f) {
-        fprintf(stderr, "Cannot open file '%s'\n", filename);
-        return 1;
-    }
-    size_t len = 256;
-    size_t ntuples = 0;
-    GrB_Index *I = malloc(len * sizeof(GrB_Index));
-    GrB_Index *J = malloc(len * sizeof(GrB_Index));
-    double     *X = malloc(len * sizeof(double));
-    if (!I || !J || !X) {
-        fprintf(stderr, "Cannot allocate memory for csv entries");
-        rc = EXIT_FAILURE;
-        goto read_matrix_free_vectors;
-    }
-
-    GrB_Index *I2, *J2;
-    double *X2;
-    GrB_Index i, j;
-    double val;
-    while (fscanf(f, "%" SCNd64 ",%" SCNd64 ",%lg", &i, &j, &val) == 3) {
-        if (ntuples >= len) {
-            I2 = realloc(I, 2 * len * sizeof(GrB_Index));
-            J2 = realloc(J, 2 * len * sizeof(GrB_Index));
-            X2 = realloc(X, 2 * len * sizeof(double));
-            if (I2 == NULL || J2 == NULL || X2 == NULL) {
-                fprintf(stderr, "Cannot reallocate memory for csv entries");
-                rc = EXIT_FAILURE;
-                goto read_matrix_free_vectors;
-            }
-            I = I2; I2 = NULL;
-            J = J2; J2 = NULL;
-            X = X2; X2 = NULL;
-            len *= 2;
-        }
-        I[ntuples] = i;
-        J[ntuples] = j;
-        X[ntuples] = val;
-        ntuples++;
-    }
-
-    if (GrB_Matrix_new(M, GrB_FP64, ndim, ndim) != GrB_SUCCESS) {
-        fprintf(stderr, "Cannot create Matrix object\n");
-        rc = EXIT_FAILURE;
-        goto read_matrix_free_vectors;
-    }
-    if (GrB_Matrix_build_FP64(*M, I, J, X, ntuples, GxB_IGNORE_DUP) != GrB_SUCCESS) {
-        fprintf(stderr, "Cannot build Matrix from vectors\n");
-        rc = EXIT_FAILURE;
-        goto read_matrix_free_vectors;
-    }
-
+static int read_matrix(GrB_Matrix *M, const char *filename, size_t ndim, GrB_Type type) {
+	int rc = 0;
+	FILE *f = fopen(filename, "r");
+	if (!f) {
+		fprintf(stderr, "Cannot open file '%s'\n", filename);
+		return 1;
+	}
+	size_t len = 256;
+	size_t ntuples = 0;
+	size_t xsize;
+	GxB_Type_size(&xsize, type);
+	GrB_Index *I = malloc(len * sizeof(I[0]));
+	GrB_Index *J = malloc(len * sizeof(J[0]));
+	void *X = malloc (len * xsize);
+	if (!I || !J || !X) {
+		fprintf(stderr, "Cannot allocate memory for csv entries");
+		rc = EXIT_FAILURE;
+		goto read_matrix_free_vectors;
+	}
+	GrB_Index *I2, *J2;
+	void *X2;
+	GrB_Index i, j;
+	uint64_t val;
+	while (fscanf(f, "%"SCNd64",%"SCNd64",%"SCNu64, &i, &j, &val) != EOF) {
+		if (ntuples >= len) {
+			I2 = realloc(I, 2 * len * sizeof(I[0]));
+			J2 = realloc(J, 2 * len * sizeof(J[0]));
+			X2 = realloc(X, 2 * len * xsize);
+			if (I2 == NULL || J2 == NULL || X2 == NULL) {
+				fprintf(stderr, "Cannot reallocate memory for csv entries");
+				rc = EXIT_FAILURE;
+				goto read_matrix_free_vectors;
+			}
+			I = I2; I2 = NULL;
+			J = J2; J2 = NULL;
+			X = X2; X2 = NULL;
+			len = len * 2 ;
+		}
+		I[ntuples] = i;
+		J[ntuples] = j;
+		memcpy(X + ntuples * xsize, &val, xsize);
+		ntuples++;
+	}
+	if (GrB_Matrix_new(M, type, ndim, ndim) != GrB_SUCCESS) {
+		fprintf(stderr, "Cannot create Matrix object\n");
+		rc = EXIT_FAILURE;
+		goto read_matrix_free_vectors;
+	}
+	if (GrB_Matrix_build(*M, I, J, X, ntuples, GxB_IGNORE_DUP) != GrB_SUCCESS) {
+		fprintf(stderr, "Cannot build Matrix from vectors\n");
+		rc = EXIT_FAILURE;
+		goto read_matrix_free_vectors;
+	}
 read_matrix_free_vectors:
-    free(I);
-    free(J);
-    free(X);
+	free(I);
+	free(J);
+	free(X);
 read_matrix_out:
-    fclose(f);
-    return rc;
+	fclose(f);
+	return rc;
 }
 
 static int mem_get_hwm(size_t *m) {
@@ -236,6 +282,30 @@ static struct exp_metadata e_metadata;
 
 static GrB_Matrix Rsa = NULL;
 static GrB_Matrix Graph = NULL;
+static GrB_BinaryOp kron_binop = NULL;
+static size_t csize;
+
+/* селектор -- побайтовая проверка на 0
+первый аргемент -- адрес, куда нужно записать bool
+второй аргумент -- адрес значения, которое хотим фильтровать*/
+void simple_fun(bool *z, const void *x, GrB_Index i, GrB_Index j, const void *y)
+{
+	bool result = false;				
+
+	const unsigned char *bytes = (const unsigned char *)x;
+	for (size_t i = 0 ; i < csize ; ++i)
+	{
+		if (*(bytes + i))
+		{
+			result = true;
+			break;
+		}
+	}
+
+	*(bool *)z = result;
+}
+
+GrB_IndexUnaryOp selector;
 
 static struct experiment_result results[MAX_RUNS];
 
@@ -247,12 +317,18 @@ static int run_kron(size_t iterations) {
 		TRY_GrB(GrB_Matrix_new (&C, GrB_BOOL, m_metadata.res_size, m_metadata.res_size), rc, "Cannot create matrix for result\n", run_kron_out);
 		TRY(mem_get_rss(&results[it].mem_before), rc, "Cannot get RSS before kron\n", run_kron_mat_free);
 		TRY(mem_reset_hwm(), rc, "Cannot reset HWM before kron\n", run_kron_mat_free);
+
+		// определяем размер типа для работы селектора
+		GrB_Type ctype;
+		GxB_BinaryOp_ztype(&ctype, kron_binop); 
+		size_t csize_cur;
+		GxB_Type_size(&csize_cur, ctype);
+		csize = (size_t)csize_cur;
 		
-		bool thunk = false; 
-		
-		clock_gettime(CLOCK_MONOTONIC, &t_start) ;
-		
-		TRY_GrB(GrB_Matrix_kronecker_BinaryOp_sel (C, NULL, NULL, GrB_EQ_FP64, Rsa, Graph, NULL, GrB_VALUENE_BOOL, &thunk), rc, "Cannot calculate kron\n", run_kron_out);
+		TRY(GrB_IndexUnaryOp_new(&selector, (GxB_index_unary_function)&simple_fun, GrB_BOOL, GrB_UINT8, GrB_UINT8), rc, "Cannot get selector\n", run_kron_out);
+
+		clock_gettime(CLOCK_MONOTONIC, &t_start);
+		TRY_GrB(GrB_Matrix_kronecker_BinaryOp_sel (C, NULL, NULL, kron_binop, Rsa, Graph, NULL, selector, NULL), rc, "Cannot calculate kron\n", run_kron_out);
 		TRY_GrB(GrB_Matrix_nvals (&results[it].nnz, C), rc, "Cannot get nvals after kron\n", run_kron_out);
 		clock_gettime(CLOCK_MONOTONIC, &t_end);
 		/*if (it == 0) {
@@ -306,11 +382,16 @@ int main(int argc, char *argv[]) {
 	}
 	TRY(read_m_metadata(&m_metadata, argv[3]), rc, "Cannot get matrices metadata from file\n", out);
 	TRY(read_e_metadata(&e_metadata, argv[4]), rc, "Cannot get experiment metadata from file\n", out);
-	TRY_GrB(GrB_init(GrB_NONBLOCKING), rc, "Cannot initialize GraphBLAS\n", out);
-	GrB_Global_set_INT32 (GrB_GLOBAL, true, GxB_BURBLE) ;
+	struct kron_input kron_settings;
+	TRY(get_kron_input(&kron_settings, m_metadata.bits), rc, "Unsupported number of bits\n", out);
 
-	TRY(read_matrix(&Rsa, argv[1], m_metadata.rsa_size), rc, "Cannot read RSA\n", out_free_rsa);
-	TRY(read_matrix(&Graph, argv[2], m_metadata.graph_size), rc, "Cannot read Graph\n", out_free_rsa);
+	TRY_GrB(GrB_init(GrB_NONBLOCKING), rc, "Cannot initialize GraphBLAS\n", out);
+
+	GrB_Global_set_INT32 (GrB_GLOBAL, true, GxB_BURBLE) ;
+	TRY_GrB(GrB_BinaryOp_new(&kron_binop, kron_settings.operation, GrB_BOOL, kron_settings.input_elemets_type, kron_settings.input_elemets_type), rc, "Cannot create binary operation\n", out_fin_graphblas) ;
+
+	TRY(read_matrix(&Rsa, argv[1], m_metadata.rsa_size, kron_settings.input_elemets_type), rc, "Cannot read RSA\n", out_free_binop);
+	TRY(read_matrix(&Graph, argv[2], m_metadata.graph_size, kron_settings.input_elemets_type), rc, "Cannot read Graph\n", out_free_rsa);
 	// Warmup
 	TRY(run_kron(e_metadata.w_runs), rc, "Cannot run warmup iterations\n", out_free_graph);
 	// Measure
@@ -321,6 +402,8 @@ out_free_graph:
 	GrB_Matrix_free(&Graph);
 out_free_rsa:
 	GrB_Matrix_free(&Rsa);
+out_free_binop:
+	GrB_BinaryOp_free(&kron_binop);
 out_fin_graphblas:
 	GrB_finalize();
 out:
